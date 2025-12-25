@@ -1,8 +1,14 @@
 import asyncio
 
-import requests
+import json
+
+import os
 
 import re
+
+import requests
+
+from dotenv import load_dotenv
 
 import phonenumbers
 
@@ -10,15 +16,36 @@ from phonenumbers import geocoder
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 
-import json
+load_dotenv()
 
-import os
 
-BOT_TOKEN = "sex:sex-sex-sex-sex"
+def require_env(name):
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return value
 
-bot = Bot(token=BOT_TOKEN)
 
-GROUP_IDS = [-sec]
+def parse_group_ids(raw_ids):
+    if raw_ids is None:
+        raise RuntimeError("Missing required environment variable: GROUP_IDS")
+    ids = []
+    for item in raw_ids.split(","):
+        stripped = item.strip()
+        if not stripped:
+            continue
+        try:
+            ids.append(int(stripped))
+        except ValueError as exc:
+            raise RuntimeError(f"Invalid GROUP_ID value: {stripped}") from exc
+    if not ids:
+        raise RuntimeError("GROUP_IDS must include at least one chat id.")
+    return ids
+
+
+BOT_TOKEN = require_env("BOT_TOKEN")
+
+GROUP_IDS = parse_group_ids(os.getenv("GROUP_IDS"))
 
 OTP_FILE = "otp_store.json"
 
@@ -32,25 +59,38 @@ API_PANELS = {
 
     "cr": {
 
-        "url": "http://sex/crapi/dgroup/viewstats",
+        "url": os.getenv("CR_API_URL", "http://sex/crapi/dgroup/viewstats"),
 
-        "token": "sex=",
+        "token": require_env("CR_API_TOKEN"),
 
-        "records": 20
+        "records": int(os.getenv("CR_API_RECORDS", "20"))
 
     },
 
     "mait": {
 
-        "url": "http://sex/crapi/mait/viewstats",
+        "url": os.getenv("MAIT_API_URL", "http://sex/crapi/mait/viewstats"),
 
-        "token": "sex",
+        "token": require_env("MAIT_API_TOKEN"),
 
-        "records": 20
+        "records": int(os.getenv("MAIT_API_RECORDS", "20"))
 
     }
 
 }
+
+
+def validate_panel_config():
+    for name, cfg in API_PANELS.items():
+        if not cfg.get("url"):
+            raise RuntimeError(f"Missing API url for panel '{name}'")
+        if not cfg.get("token"):
+            raise RuntimeError(f"Missing API token for panel '{name}'")
+
+
+validate_panel_config()
+
+bot = Bot(token=BOT_TOKEN)
 
 # ============================
 
