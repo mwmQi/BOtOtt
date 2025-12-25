@@ -8,11 +8,11 @@ import phonenumbers
 
 from phonenumbers import geocoder
 
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
-import json
+import sqlite3
 
-import os
+from datetime import datetime, timedelta
 
 BOT_TOKEN = "sex:sex-sex-sex-sex"
 
@@ -20,7 +20,8 @@ bot = Bot(token=BOT_TOKEN)
 
 GROUP_IDS = [-sec]
 
-OTP_FILE = "otp_store.json"
+OTP_DB = "otp_store.db"
+OTP_TTL_MINUTES = 15
 
 # ============================
 
@@ -77,28 +78,67 @@ def cli_passes_filter(cli):
         return not any(b.lower() in cli_lower for b in BLOCKED_CLIS)
 
     return True
-
+# ============================
+# OTP STORAGE (SQLite)
 # ============================
 
-# OTP STORAGE
+def get_db_connection():
+    return sqlite3.connect(OTP_DB, check_same_thread=False)
 
-# ============================
 
-def load_otp_store():
+def init_db():
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS otps (
+                number TEXT PRIMARY KEY,
+                otp TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            )
+            """
+        )
 
-    if not os.path.exists(OTP_FILE):
 
-        return {}
+def store_otp(number, otp):
+    now = datetime.utcnow()
+    expires_at = now + timedelta(minutes=OTP_TTL_MINUTES)
+    with get_db_connection() as conn:
+        conn.execute("BEGIN")
+        conn.execute(
+            """
+            INSERT INTO otps (number, otp, created_at, expires_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(number) DO UPDATE SET
+                otp=excluded.otp,
+                created_at=excluded.created_at,
+                expires_at=excluded.expires_at
+            """,
+            (number, otp, now.isoformat(), expires_at.isoformat()),
+        )
+        conn.commit()
 
-    with open(OTP_FILE, "r") as f:
 
-        return json.load(f)
+def get_otp(number):
+    purge_expired_otps()
+    now_iso = datetime.utcnow().isoformat()
+    with get_db_connection() as conn:
+        cur = conn.execute(
+            "SELECT otp FROM otps WHERE number = ? AND expires_at > ?",
+            (number, now_iso),
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
 
-def save_otp_store(data):
 
-    with open(OTP_FILE, "w") as f:
-
-        json.dump(data, f, indent=2)
+def purge_expired_otps():
+    with get_db_connection() as conn:
+        conn.execute("BEGIN")
+        conn.execute(
+            "DELETE FROM otps WHERE expires_at <= ?",
+            (datetime.utcnow().isoformat(),),
+        )
+        conn.commit()
 
 # ============================
 
@@ -349,15 +389,15 @@ async def command_listener():
 
                         number = parts[1]
 
-                        store = load_otp_store()
+                        existing = get_otp(number)
 
-                        if number in store:
+                        if existing:
 
                             await bot.send_message(
 
                                 chat_id=chat_id,
 
-                                text=f"🔐 OTP for {number}:\n<code>{store[number]}</code>",
+                                text=f"🔐 OTP for {number}:\n<code>{existing}</code>",
 
                                 parse_mode="HTML"
 
@@ -377,9 +417,7 @@ async def command_listener():
 
                                     if otp:
 
-                                        store[number] = otp
-
-                                        save_otp_store(store)
+                                        store_otp(number, otp)
 
                                         await bot.send_message(
 
@@ -387,7 +425,7 @@ async def command_listener():
 
                                             text=f"✅ OTP Found & Saved:\n<code>{otp}</code>",
 
-                                            parse_mode="HTML"
+                                            parse_mode="HTML",
 
                                         )
 
@@ -439,11 +477,7 @@ async def api_worker(panel):
 
                 if otp:
 
-                    store = load_otp_store()
-
-                    store[data["number"]] = otp
-
-                    save_otp_store(store)
+                    store_otp(data["number"], otp)
 
                 msg = format_message(data)
 
@@ -455,15 +489,35 @@ async def api_worker(panel):
 
 # ============================
 
+# OTP CLEANUP WORKER
+
+# ============================
+
+async def otp_cleanup_worker():
+
+    while True:
+
+        purge_expired_otps()
+
+        await asyncio.sleep(60)
+
+# ============================
+
 # MAIN
 
 # ============================
 
 async def main():
 
+    init_db()
+
+    purge_expired_otps()
+
     tasks = [api_worker(panel) for panel in API_PANELS]
 
     tasks.append(command_listener())
+
+    tasks.append(otp_cleanup_worker())
 
     await asyncio.gather(*tasks)
 
